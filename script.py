@@ -3,7 +3,7 @@ import collections
 import logging
 import math
 import pprint
-
+import os
 import numpy as np
 import torch
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
@@ -23,8 +23,7 @@ from utils_ner import read_examples_from_file, convert_examples_to_features
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-n_gpu = torch.cuda.device_count()
-
+print(f'Running NER explainer on {device}')
 RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "start_logits", "end_logits"])
 
@@ -35,6 +34,14 @@ parser.add_argument(
     default="",
     type=str,
     help="Pretrained tokenizer name or path if not the same as model_name",
+)
+
+parser.add_argument(
+    "--model_type",
+    default=None,
+    type=str,
+    required=True,
+    help="Model type selected in the supported list",
 )
 
 parser.add_argument(
@@ -63,11 +70,35 @@ parser.add_argument(
     help="Path to a file containing all labels. If not specified, CoNLL-2003 labels are used.",
 )
 
+parser.add_argument(
+    "--per_gpu_eval_batch_size", default=8, type=int, help="Batch size per GPU/CPU for evaluation."
+)
+
+parser.add_argument(
+    "--max_seq_length",
+    default=128,
+    type=int,
+    help="The maximum total input sequence length after tokenization. Sequences longer "
+         "than this will be truncated, sequences shorter will be padded.",
+)
+
+parser.add_argument(
+    "--data_dir",
+    default=None,
+    type=str,
+    required=True,
+    help="The input data dir. Should contain the training files for the CoNLL-2003 NER task.",
+)
+
+parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+
 args = parser.parse_args()
 
 TOKENIZER_ARGS = ["do_lower_case", "strip_accents", "keep_accents", "use_fast"]
 tokenizer_args = {k: v for k, v in vars(args).items() if v is not None and k in TOKENIZER_ARGS}
 
+args.n_gpu = 0 if device == "cpu" else torch.cuda.device_count()
+args.device = device
 labels = get_labels(args.labels)
 num_labels = len(labels)
 mode = "test"
@@ -85,15 +116,10 @@ config = AutoConfig.from_pretrained(
     label2id={label: i for i, label in enumerate(labels)},
     cache_dir=args.cache_dir if args.cache_dir else None,
 )
-model = AutoModelForTokenClassification.from_pretrained(
-    args.model_name_or_path,
-    from_tf=bool(".ckpt" in args.model_name_or_path),
-    config=config,
-    cache_dir=args.cache_dir if args.cache_dir else None,
-)
-model.load_state_dict(torch.load(args.model_name_or_path, map_location='cpu'))
+model = AutoModelForTokenClassification.from_pretrained(args.model_name_or_path)
+# TODO load_state_dict may not be required
+model.load_state_dict(torch.load(os.path.join(args.model_name_or_path, 'pytorch_model.bin'), map_location='cpu'))
 model.to(device)
-print()
 
 hidden_size = 384
 encoder = EncoderRNN(384, config.hidden_size, hidden_size).to(device)
@@ -110,7 +136,7 @@ examples = read_examples_from_file(args.data_dir, mode)
 features = convert_examples_to_features(
     examples,
     labels,
-    args.max_seq_len,
+    args.max_seq_length,
     tokenizer,
     cls_token_at_end=bool(args.model_type in ["xlnet"]),
     cls_token=tokenizer.cls_token,
@@ -180,8 +206,7 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
         out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
     explainer = BertExplainer(model)
     # TODO What actually goes into the explainer?
-    relevance, attentions, self_attentions = explainer.explain(input_ids, segment_ids, attention_mask,
-                                                               [o["span"] for o in out_label_ids.values()])
+    relevance, attentions, self_attentions = explainer.explain(input_ids, segment_ids, attention_mask, out_label_ids)
 
     input_tensor = torch.stack(
         [r.sum(-1).unsqueeze(-1) * explainer.layer_values_global["bert.encoder"]["input"][0] for r in
