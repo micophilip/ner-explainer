@@ -1,6 +1,5 @@
 import argparse
 import collections
-import json
 import logging
 import math
 import pprint
