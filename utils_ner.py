@@ -7,8 +7,6 @@ from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from bert_explainer import BertExplainer
-
 logger = logging.getLogger(__name__)
 import torch
 
@@ -302,17 +300,6 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
         else:
             preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
             out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
-        explainer = BertExplainer(model)
-        # TODO What actually goes into the explainer?
-        relevance, attentions, self_attentions = explainer.explain(input_ids, segment_ids, attention_mask,
-                                                                   [o["span"] for o in out_label_ids.values()])
-
-        input_tensor = torch.stack(
-            [r.sum(-1).unsqueeze(-1) * explainer.layer_values_global["bert.encoder"]["input"][0] for r in
-             relevance], 0)
-        target_tensor = torch.stack(relevance, 0).sum(-1)
-        loss = train_autoencoder(input_tensor, target_tensor, encoder,
-                                 decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=13)
 
     eval_loss = eval_loss / nb_eval_steps
     preds = np.argmax(preds, axis=2)
