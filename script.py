@@ -28,7 +28,7 @@ n_gpu = torch.cuda.device_count()
 RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "start_logits", "end_logits"])
 
-parser = argparse.ArgumentParser
+parser = argparse.ArgumentParser()
 
 parser.add_argument(
     "--tokenizer_name",
