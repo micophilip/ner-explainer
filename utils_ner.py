@@ -1,19 +1,12 @@
 import logging
 import os
-import time
-import argparse
-import glob
-import logging
-import os
-import random
 
 import numpy as np
-import torch
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
-from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
-from tqdm import tqdm, trange
+from tqdm import tqdm
+
 from bert_explainer import BertExplainer
 
 logger = logging.getLogger(__name__)
@@ -314,6 +307,12 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
         relevance, attentions, self_attentions = explainer.explain(input_ids, segment_ids, attention_mask,
                                                                    [o["span"] for o in out_label_ids.values()])
 
+        input_tensor = torch.stack(
+            [r.sum(-1).unsqueeze(-1) * explainer.layer_values_global["bert.encoder"]["input"][0] for r in
+             relevance], 0)
+        target_tensor = torch.stack(relevance, 0).sum(-1)
+        loss = train_autoencoder(input_tensor, target_tensor, encoder,
+                                 decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=13)
 
     eval_loss = eval_loss / nb_eval_steps
     preds = np.argmax(preds, axis=2)

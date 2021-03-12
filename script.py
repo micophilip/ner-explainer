@@ -1,24 +1,27 @@
-import math
+import argparse
 import collections
 import json
+import logging
+import math
 import pprint
+
+import numpy as np
 import torch
+from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
+from termcolor import colored
 from torch import nn, optim
 from torch.nn import CrossEntropyLoss
-from torch.utils.data import (DataLoader,
-                              SequentialSampler,
-                              TensorDataset)
-import argparse
-
+from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-from termcolor import colored
-from utils_ner import read_examples_from_file, convert_examples_to_features, evaluate
-from autoencoder import EncoderRNN, DecoderRNN, train_autoencoder
-
-from bert_explainer import BertExplainer
 from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
 
+from autoencoder import EncoderRNN, DecoderRNN, train_autoencoder
+from bert_explainer import BertExplainer
 from utils_ner import get_labels
+from utils_ner import read_examples_from_file, convert_examples_to_features
+
+logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_gpu = torch.cuda.device_count()
@@ -68,6 +71,7 @@ tokenizer_args = {k: v for k, v in vars(args).items() if v is not None and k in 
 
 labels = get_labels(args.labels)
 num_labels = len(labels)
+mode = "test"
 
 tokenizer = AutoTokenizer.from_pretrained(
     args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
@@ -141,59 +145,100 @@ with open("/content/drive/My Drive/train-v2.0.json") as f:
             all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
             all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
 
-            dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+            eval_dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+            ############################################################################################################
+            prefix = ""
+            args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+            # Note that DistributedSampler samples randomly
+            eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(
+                eval_dataset)
+            eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-            result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="test")
+            # multi-gpu evaluate
+            if args.n_gpu > 1:
+                model = torch.nn.DataParallel(model)
 
-            # Run prediction for full data
-            pred_sampler = SequentialSampler(dataset)
-            pred_dataloader = DataLoader(dataset, sampler=pred_sampler, batch_size=9)
+            # Eval!
+            logger.info("***** Running evaluation %s *****", prefix)
+            logger.info("  Num examples = %d", len(eval_dataset))
+            logger.info("  Batch size = %d", args.eval_batch_size)
+            eval_loss = 0.0
+            nb_eval_steps = 0
+            preds = None
+            out_label_ids = None
+            model.eval()
+            for batch in tqdm(eval_dataloader, desc="Evaluating"):
+                batch = tuple(t.to(args.device) for t in batch)
 
-            predictions = []
-            for input_ids, input_mask, segment_ids, example_indices in tqdm(pred_dataloader):
-                input_ids = input_ids.to(device)
-                input_mask = input_mask.to(device)
-                segment_ids = segment_ids.to(device)
+                input_ids = batch[0]
+                attention_mask = batch[1]
+                segment_ids = batch[2]
+                batch_labels = batch[3]
 
-                # explainer = shap.DeepExplainer(model, [input_ids, segment_ids, input_mask])
                 with torch.no_grad():
-                    # tensor_output = model(input_ids, segment_ids, input_mask)
-                    batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
-                    # batch_start_logits, batch_end_logits = torch.split(tensor_output, int(tensor_output.shape[1]/2), dim=1)
-                    # shap_values = explainer.shap_values([input_ids, segment_ids, input_mask])
+                    inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+                    if args.model_type != "distilbert":
+                        inputs["token_type_ids"] = (
+                            batch[2] if args.model_type in ["bert", "xlnet"] else None
+                        )  # XLM and RoBERTa don"t use segment_ids
+                    outputs = model(**inputs)
+                    tmp_eval_loss, logits = outputs[:2]
 
-                features = []
-                examples_batch = []
-                all_results = []
+                    if args.n_gpu > 1:
+                        tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
 
-                print(len(examples), example_indices.max())
-                for i, example_index in enumerate(example_indices):
-                    start_logits = batch_start_logits[i].detach().cpu().tolist()
-                    end_logits = batch_end_logits[i].detach().cpu().tolist()
-                    feature = features[example_index.item()]
-                    unique_id = int(feature.unique_id)
-                    features.append(feature)
-                    examples_batch.append(examples[example_index.item()])
-                    all_results.append(RawResult(unique_id=unique_id,
-                                                 start_logits=start_logits,
-                                                 end_logits=end_logits))
-
-                output_indices = predict(examples_batch, features, all_results, 30)
-                predictions.append(output_indices)
-
+                    eval_loss += tmp_eval_loss.item()
+                nb_eval_steps += 1
+                if preds is None:
+                    preds = logits.detach().cpu().numpy()
+                    out_label_ids = inputs["labels"].detach().cpu().numpy()
+                else:
+                    preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
+                    out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
                 explainer = BertExplainer(model)
-                relevance, attentions, self_attentions = explainer.explain(input_ids, segment_ids, input_mask,
-                                                                           [o["span"] for o in output_indices.values()])
+                # TODO What actually goes into the explainer?
+                relevance, attentions, self_attentions = explainer.explain(input_ids, segment_ids, attention_mask,
+                                                                           [o["span"] for o in out_label_ids.values()])
+
                 input_tensor = torch.stack(
                     [r.sum(-1).unsqueeze(-1) * explainer.layer_values_global["bert.encoder"]["input"][0] for r in
                      relevance], 0)
                 target_tensor = torch.stack(relevance, 0).sum(-1)
-                loss = train_autoencoder(input_tensor, target_tensor, encoder,
-                                         decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=13)
+                encoder_loss = train_autoencoder(input_tensor, target_tensor, encoder,
+                                                 decoder, encoder_optimizer, decoder_optimizer, criterion,
+                                                 max_length=13)
+                print('Encoder loss: %.4f' % encoder_loss)
 
-                print('Encoder loss: %.4f' % loss)
+            eval_loss = eval_loss / nb_eval_steps
+            preds = np.argmax(preds, axis=2)
+
+            label_map = {i: label for i, label in enumerate(labels)}
+
+            out_label_list = [[] for _ in range(out_label_ids.shape[0])]
+            predictions = [[] for _ in range(out_label_ids.shape[0])]
+
+            for i in range(out_label_ids.shape[0]):
+                for j in range(out_label_ids.shape[1]):
+                    if out_label_ids[i, j] != pad_token_label_id:
+                        out_label_list[i].append(label_map[out_label_ids[i][j]])
+                        predictions[i].append(label_map[preds[i][j]])
+
+            results = {
+                "loss": eval_loss,
+                "precision": precision_score(out_label_list, predictions),
+                "recall": recall_score(out_label_list, predictions),
+                "f1": f1_score(out_label_list, predictions),
+            }
+
+            logger.info("***** Eval results %s *****", prefix)
+            for key in sorted(results.keys()):
+                logger.info("  %s = %s", key, str(results[key]))
+
+            if mode == "test":
+                print(classification_report(out_label_list, predictions))
 
             # For printing the results ####
+            # TODO Needs to be accustomed for NER
             index = None
             for example in examples:
                 if index != example.example_id:
