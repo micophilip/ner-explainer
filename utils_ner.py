@@ -330,3 +330,9 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
         print(classification_report(out_label_list, preds_list))
 
     return results, preds_list
+
+
+def predict(input_ids, model, labels):
+    output = model(input_ids=input_ids, labels=labels)
+    _, logits = output[:2]
+    return logits

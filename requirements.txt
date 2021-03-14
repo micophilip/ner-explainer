@@ -4,3 +4,4 @@ tqdm==4.58.0
 termcolor==1.1.0
 transformers==3.0.0
 seqeval==1.2.2
+captum==0.3.1

@@ -14,11 +14,11 @@ from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
-
+from captum.attr import DeepLift, LayerIntegratedGradients, LayerDeepLift, DeepLiftShap, LayerDeepLiftShap
+import random
 from autoencoder import EncoderRNN, DecoderRNN, train_autoencoder
 from bert_explainer import BertExplainer
-from utils_ner import get_labels
-from utils_ner import read_examples_from_file, convert_examples_to_features
+from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +95,12 @@ parser.add_argument("--local_rank", type=int, default=-1, help="For distributed 
 args = parser.parse_args()
 
 TOKENIZER_ARGS = ["do_lower_case", "strip_accents", "keep_accents", "use_fast"]
-tokenizer_args = {k: v for k, v in vars(args).items() if v is not None and k in TOKENIZER_ARGS}
 
+random.seed(123)
+np.random.seed(123)
+torch.manual_seed(123)
+
+tokenizer_args = {k: v for k, v in vars(args).items() if v is not None and k in TOKENIZER_ARGS}
 args.n_gpu = 0 if device == "cpu" else torch.cuda.device_count()
 args.device = device
 labels = get_labels(args.labels)
@@ -121,9 +125,9 @@ model = AutoModelForTokenClassification.from_pretrained(args.model_name_or_path)
 model.load_state_dict(torch.load(os.path.join(args.model_name_or_path, 'pytorch_model.bin'), map_location='cpu'))
 model.to(device)
 
-hidden_size = 384
-encoder = EncoderRNN(384, config.hidden_size, hidden_size).to(device)
-decoder = DecoderRNN(384, config.hidden_size, hidden_size).to(device)
+hidden_size = 128
+encoder = EncoderRNN(128, config.hidden_size, hidden_size).to(device)
+decoder = DecoderRNN(128, config.hidden_size, hidden_size).to(device)
 encoder_optimizer = optim.Adam(encoder.parameters())
 decoder_optimizer = optim.Adam(decoder.parameters())
 criterion = nn.MSELoss()
@@ -176,6 +180,10 @@ nb_eval_steps = 0
 preds = None
 out_label_ids = None
 model.eval()
+
+# baseline = torch.zeros(1, args.max_seq_length, config.hidden_size)
+explainer = LayerIntegratedGradients(predict, model.bert.embeddings)
+
 for batch in tqdm(eval_dataloader, desc="Evaluating"):
     batch = tuple(t.to(args.device) for t in batch)
 
@@ -185,11 +193,7 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
     batch_labels = batch[3]
 
     with torch.no_grad():
-        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
-        if args.model_type != "distilbert":
-            inputs["token_type_ids"] = (
-                batch[2] if args.model_type in ["bert", "xlnet"] else None
-            )  # XLM and RoBERTa don"t use segment_ids
+        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "token_type_ids": batch[2], "labels": batch[3]}
         outputs = model(**inputs)
         tmp_eval_loss, logits = outputs[:2]
 
@@ -204,18 +208,30 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
     else:
         preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
         out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
-    explainer = BertExplainer(model)
-    # TODO What actually goes into the explainer?
-    relevance, attentions, self_attentions = explainer.explain(input_ids, segment_ids, attention_mask, out_label_ids)
 
-    input_tensor = torch.stack(
-        [r.sum(-1).unsqueeze(-1) * explainer.layer_values_global["bert.encoder"]["input"][0] for r in
-         relevance], 0)
-    target_tensor = torch.stack(relevance, 0).sum(-1)
-    encoder_loss = train_autoencoder(input_tensor, target_tensor, encoder,
-                                     decoder, encoder_optimizer, decoder_optimizer, criterion,
-                                     max_length=13)
-    print('Encoder loss: %.4f' % encoder_loss)
+    # TODO No support for multi-label classification, attribute has to be called for every PHI
+    # TODO To use DeepLIFT, ModelWrapper has to be created that overrides forward and possibly load_state_dict
+    # input_embeddings = model.bert.embeddings(input_ids)
+    #
+    # attributions, delta = explainer.attribute(input_ids, target=torch.zeros(1, 128, 43),
+    #                                           additional_forward_args=(model, batch_labels),
+    #                                           return_convergence_delta=True)
+
+    # print('DeepLIFT Attributions: ', attributions)
+    # print('Convergence Delta: ', delta)
+
+    # explainer = BertExplainer(model)
+    # # TODO What actually goes into the explainer? Is out_label_ids really what explainer is looking for?
+    # relevance, attentions, self_attentions = explainer.explain(inputs, out_label_ids)
+    #
+    # input_tensor = torch.stack(
+    #     [r.sum(-1).unsqueeze(-1) * explainer.layer_values_global["bert.encoder"]["input"][0] for r in
+    #      relevance], 0)
+    # target_tensor = torch.stack(relevance, 0).sum(-1)
+    # encoder_loss = train_autoencoder(input_tensor, target_tensor, encoder,
+    #                                  decoder, encoder_optimizer, decoder_optimizer, criterion,
+    #                                  max_length=args.max_seq_length)
+    # print('Encoder loss: %.4f' % encoder_loss)
 
 eval_loss = eval_loss / nb_eval_steps
 preds = np.argmax(preds, axis=2)
@@ -247,17 +263,26 @@ if mode == "test":
 
 # For printing the results ####
 # TODO Needs to be accustomed for NER
-index = None
+index = 0
 for example in examples:
-    if index != example.example_id:
-        pp.pprint(example.para_text)
-        index = example.example_id
-        print('\n')
-        print(colored('***********Question and Answers *************', 'red'))
 
-    ques_text = colored(example.question_text + " Unanswerable: " + str(example.unanswerable), 'blue')
-    print(ques_text)
-    prediction = colored(predictions[math.floor(example.unique_id / 9)][example]['text'], 'green',
-                         attrs=['reverse', 'blink'])
-    print(prediction)
-    print('\n')
+    print(colored(f'************ Example number {index + 1} ************', 'magenta'))
+
+    colored_words = []
+    noteworthy = []
+
+    for i, element in enumerate(example.words):
+        if example.labels[i] != predictions[index][i]:
+            colored_words.append(colored(element, 'red', attrs=['reverse', 'blink']))
+            print(
+                f'{element} was predicted as {predictions[index][i]} but it is actually {example.labels[i]}')
+        elif example.labels[i] != 'O' and predictions[index][i] == example.labels[i]:
+            colored_words.append(colored(element, 'green', attrs=['reverse']))
+            print(f'{element} was correctly predicted as {predictions[index][i]}.')
+        else:
+            colored_words.append(colored(element, 'blue'))
+
+    sentence = ' '.join(colored_words)
+    print(sentence)
+
+    index += 1
