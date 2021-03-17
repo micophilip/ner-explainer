@@ -103,6 +103,7 @@ def convert_examples_to_features(
     label_map = {label: i for i, label in enumerate(label_list)}
 
     features = []
+    all_tokens = []
     for (ex_index, example) in enumerate(examples):
         if ex_index % 10000 == 0:
             logger.info("Writing example %d of %d", ex_index, len(examples))
@@ -159,6 +160,7 @@ def convert_examples_to_features(
             label_ids = [pad_token_label_id] + label_ids
             segment_ids = [cls_token_segment_id] + segment_ids
 
+        all_tokens.append(tokens)
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
         # The mask has 1 for real tokens and 0 for padding tokens. Only real
@@ -195,7 +197,7 @@ def convert_examples_to_features(
         features.append(
             InputFeatures(input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, label_ids=label_ids)
         )
-    return features
+    return features, all_tokens
 
 
 def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode):
@@ -335,4 +337,5 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
 def predict(input_ids, model, labels):
     output = model(input_ids=input_ids, labels=labels)
     _, logits = output[:2]
+    logits.requires_grad_()
     return logits

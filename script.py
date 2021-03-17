@@ -1,11 +1,14 @@
 import argparse
 import collections
 import logging
-import math
-import pprint
 import os
+import pprint
+import random
+
 import numpy as np
 import torch
+from captum.attr import LayerIntegratedGradients
+from captum.attr import visualization as viz
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 from termcolor import colored
 from torch import nn, optim
@@ -14,10 +17,8 @@ from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
-from captum.attr import DeepLift, LayerIntegratedGradients, LayerDeepLift, DeepLiftShap, LayerDeepLiftShap
-import random
-from autoencoder import EncoderRNN, DecoderRNN, train_autoencoder
-from bert_explainer import BertExplainer
+
+from autoencoder import EncoderRNN, DecoderRNN
 from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict
 
 logger = logging.getLogger(__name__)
@@ -137,7 +138,7 @@ pp = pprint.PrettyPrinter(indent=4)
 pad_token_label_id = CrossEntropyLoss().ignore_index
 examples = read_examples_from_file(args.data_dir, mode)
 
-features = convert_examples_to_features(
+features, all_tokens = convert_examples_to_features(
     examples,
     labels,
     args.max_seq_length,
@@ -178,6 +179,8 @@ logger.info("  Batch size = %d", args.eval_batch_size)
 eval_loss = 0.0
 nb_eval_steps = 0
 preds = None
+attributions = None
+delta = None
 out_label_ids = None
 model.eval()
 
@@ -211,29 +214,17 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
 
     # TODO No support for multi-label classification, attribute has to be called for every PHI
     # TODO To use DeepLIFT, ModelWrapper has to be created that overrides forward and possibly load_state_dict
-    # input_embeddings = model.bert.embeddings(input_ids)
-    #
-    # attributions, delta = explainer.attribute(input_ids, target=torch.zeros(1, 128, 43),
-    #                                           additional_forward_args=(model, batch_labels),
-    #                                           return_convergence_delta=True)
 
-    # print('DeepLIFT Attributions: ', attributions)
-    # print('Convergence Delta: ', delta)
+    # TODO Attribute for every label without hardcoding label index
 
-    # explainer = BertExplainer(model)
-    # # TODO What actually goes into the explainer? Is out_label_ids really what explainer is looking for?
-    # relevance, attentions, self_attentions = explainer.explain(inputs, out_label_ids)
-    #
-    # input_tensor = torch.stack(
-    #     [r.sum(-1).unsqueeze(-1) * explainer.layer_values_global["bert.encoder"]["input"][0] for r in
-    #      relevance], 0)
-    # target_tensor = torch.stack(relevance, 0).sum(-1)
-    # encoder_loss = train_autoencoder(input_tensor, target_tensor, encoder,
-    #                                  decoder, encoder_optimizer, decoder_optimizer, criterion,
-    #                                  max_length=args.max_seq_length)
-    # print('Encoder loss: %.4f' % encoder_loss)
+    target = (0, 11)  # Explain label 11 (index of target class, B-PATIENT in this case)
+
+    attributions, delta = explainer.attribute(input_ids, target=target,
+                                              additional_forward_args=(model, batch_labels),
+                                              return_convergence_delta=True)
 
 eval_loss = eval_loss / nb_eval_steps
+confidences = torch.softmax(torch.from_numpy(preds), dim=2).detach().cpu().numpy()
 preds = np.argmax(preds, axis=2)
 
 label_map = {i: label for i, label in enumerate(labels)}
@@ -269,7 +260,6 @@ for example in examples:
     print(colored(f'************ Example number {index + 1} ************', 'magenta'))
 
     colored_words = []
-    noteworthy = []
 
     for i, element in enumerate(example.words):
         if example.labels[i] != predictions[index][i]:
@@ -284,5 +274,24 @@ for example in examples:
 
     sentence = ' '.join(colored_words)
     print(sentence)
+
+    token_index = 3  # Explains why token at index 3 was labeled as 11 (B-PATIENT)
+
+    # TODO Generalize to each example and each PHI label in the example
+
+    attributions = attributions.sum(dim=2).squeeze(0)
+    attributions_sum = attributions / torch.norm(attributions)
+    score_vis = viz.VisualizationDataRecord(word_attributions=attributions_sum,
+                                            pred_prob=max(confidences[index][token_index]),
+                                            pred_class='B-PATIENT',
+                                            true_class='B-PATIENT',
+                                            attr_class='B-PATIENT',
+                                            attr_score=attributions_sum.sum(),
+                                            raw_input=all_tokens[index],
+                                            convergence_score=delta)
+    display = viz.visualize_text([score_vis])
+
+    with open('explanations.html', 'w') as file:
+        file.write(display.data)
 
     index += 1
