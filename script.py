@@ -2,7 +2,6 @@ import argparse
 import collections
 import logging
 import os
-import pprint
 import random
 
 import numpy as np
@@ -11,14 +10,12 @@ from captum.attr import LayerIntegratedGradients
 from captum.attr import visualization as viz
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 from termcolor import colored
-from torch import nn, optim
 from torch.nn import CrossEntropyLoss
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
 
-from autoencoder import EncoderRNN, DecoderRNN
 from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict
 
 logger = logging.getLogger(__name__)
@@ -72,10 +69,6 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "--per_gpu_eval_batch_size", default=8, type=int, help="Batch size per GPU/CPU for evaluation."
-)
-
-parser.add_argument(
     "--max_seq_length",
     default=128,
     type=int,
@@ -106,6 +99,7 @@ args.n_gpu = 0 if device == "cpu" else torch.cuda.device_count()
 args.device = device
 labels = get_labels(args.labels)
 num_labels = len(labels)
+label2id = {label: i for i, label in enumerate(labels)}
 mode = "test"
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -118,22 +112,12 @@ config = AutoConfig.from_pretrained(
     args.config_name if args.config_name else args.model_name_or_path,
     num_labels=num_labels,
     id2label={str(i): label for i, label in enumerate(labels)},
-    label2id={label: i for i, label in enumerate(labels)},
+    label2id=label2id,
     cache_dir=args.cache_dir if args.cache_dir else None,
 )
 model = AutoModelForTokenClassification.from_pretrained(args.model_name_or_path)
-# TODO load_state_dict may not be required
 model.load_state_dict(torch.load(os.path.join(args.model_name_or_path, 'pytorch_model.bin'), map_location='cpu'))
 model.to(device)
-
-hidden_size = 128
-encoder = EncoderRNN(128, config.hidden_size, hidden_size).to(device)
-decoder = DecoderRNN(128, config.hidden_size, hidden_size).to(device)
-encoder_optimizer = optim.Adam(encoder.parameters())
-decoder_optimizer = optim.Adam(decoder.parameters())
-criterion = nn.MSELoss()
-
-pp = pprint.PrettyPrinter(indent=4)
 
 pad_token_label_id = CrossEntropyLoss().ignore_index
 examples = read_examples_from_file(args.data_dir, mode)
@@ -162,7 +146,7 @@ all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
 eval_dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
 
 prefix = ""
-args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+args.eval_batch_size = 1 * max(1, args.n_gpu)
 # Note that DistributedSampler samples randomly
 eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(
     eval_dataset)
@@ -179,15 +163,16 @@ logger.info("  Batch size = %d", args.eval_batch_size)
 eval_loss = 0.0
 nb_eval_steps = 0
 preds = None
-attributions = None
-delta = None
 out_label_ids = None
 model.eval()
 
-# baseline = torch.zeros(1, args.max_seq_length, config.hidden_size)
 explainer = LayerIntegratedGradients(predict, model.bert.embeddings)
+example_index = 0
+
+all_attributions = []
 
 for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    example_attrs = []
     batch = tuple(t.to(args.device) for t in batch)
 
     input_ids = batch[0]
@@ -205,23 +190,33 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
 
         eval_loss += tmp_eval_loss.item()
     nb_eval_steps += 1
+    logits_ndarray = logits.detach().cpu().numpy()
     if preds is None:
-        preds = logits.detach().cpu().numpy()
+        preds = logits_ndarray
         out_label_ids = inputs["labels"].detach().cpu().numpy()
     else:
-        preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
+        preds = np.append(preds, logits_ndarray, axis=0)
         out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
 
-    # TODO No support for multi-label classification, attribute has to be called for every PHI
     # TODO To use DeepLIFT, ModelWrapper has to be created that overrides forward and possibly load_state_dict
 
-    # TODO Attribute for every label without hardcoding label index
+    example_preds = np.argmax(logits_ndarray, axis=2)
 
-    target = (0, 11)  # Explain label 11 (index of target class, B-PATIENT in this case)
+    for token_index in np.where(example_preds[example_index] != 0)[0]:
+        if out_label_ids[example_index][token_index] != pad_token_label_id:
+            label_id = example_preds[example_index][token_index]
+            target = (example_index, label_id)
+            attributions, delta = explainer.attribute(input_ids, target=target,
+                                                      additional_forward_args=(model, batch_labels),
+                                                      return_convergence_delta=True)
+            attributions = attributions.sum(dim=2).squeeze(0)
+            attributions_sum = attributions / torch.norm(attributions)
+            example_attrs.append({'attributions': attributions_sum, 'delta': delta,
+                                  'token_index': token_index, 'label_id': label_id})
 
-    attributions, delta = explainer.attribute(input_ids, target=target,
-                                              additional_forward_args=(model, batch_labels),
-                                              return_convergence_delta=True)
+    all_attributions.append(example_attrs)
+
+    example_index += 1
 
 eval_loss = eval_loss / nb_eval_steps
 confidences = torch.softmax(torch.from_numpy(preds), dim=2).detach().cpu().numpy()
@@ -255,6 +250,7 @@ if mode == "test":
 # For printing the results ####
 # TODO Needs to be accustomed for NER
 index = 0
+all_visualizations = []
 for example in examples:
 
     print(colored(f'************ Example number {index + 1} ************', 'magenta'))
@@ -275,23 +271,26 @@ for example in examples:
     sentence = ' '.join(colored_words)
     print(sentence)
 
-    token_index = 3  # Explains why token at index 3 was labeled as 11 (B-PATIENT)
+    example_attributions = all_attributions[index]
 
-    # TODO Generalize to each example and each PHI label in the example
-
-    attributions = attributions.sum(dim=2).squeeze(0)
-    attributions_sum = attributions / torch.norm(attributions)
-    score_vis = viz.VisualizationDataRecord(word_attributions=attributions_sum,
-                                            pred_prob=max(confidences[index][token_index]),
-                                            pred_class='B-PATIENT',
-                                            true_class='B-PATIENT',
-                                            attr_class='B-PATIENT',
-                                            attr_score=attributions_sum.sum(),
-                                            raw_input=all_tokens[index],
-                                            convergence_score=delta)
-    display = viz.visualize_text([score_vis])
-
-    with open('explanations.html', 'w') as file:
-        file.write(display.data)
+    for label_attribution in example_attributions:
+        label_id = label_attribution['label_id']
+        token_index = np.where(preds[index] == label_attribution['label_id'])[0][0]
+        attributions_sum = label_attribution['attributions']
+        delta = label_attribution['delta']
+        score_vis = viz.VisualizationDataRecord(word_attributions=attributions_sum,
+                                                pred_prob=max(confidences[index][token_index]),
+                                                pred_class=labels[label_id],
+                                                true_class=labels[label_id],
+                                                attr_class=labels[label_id],
+                                                attr_score=attributions_sum.sum(),
+                                                raw_input=all_tokens[index],
+                                                convergence_score=delta)
+        all_visualizations.append(score_vis)
 
     index += 1
+
+display = viz.visualize_text(all_visualizations)
+
+with open('explanations.html', 'w') as file:
+    file.write(display.data)
