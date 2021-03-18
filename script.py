@@ -3,7 +3,7 @@ import collections
 import logging
 import os
 import random
-
+import time
 import numpy as np
 import torch
 from captum.attr import LayerIntegratedGradients
@@ -18,6 +18,7 @@ from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokeni
 
 from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -87,7 +88,7 @@ parser.add_argument(
 parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 
 args = parser.parse_args()
-
+whole_process_start = time.time()
 TOKENIZER_ARGS = ["do_lower_case", "strip_accents", "keep_accents", "use_fast"]
 
 random.seed(123)
@@ -206,9 +207,14 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
         if out_label_ids[example_index][token_index] != pad_token_label_id:
             label_id = example_preds[example_index][token_index]
             target = (example_index, label_id)
+            logger.info(f'Calculating attribution for label {label_id} at index {token_index}')
+            attribution_start = time.time()
             attributions, delta = explainer.attribute(input_ids, target=target,
                                                       additional_forward_args=(model, batch_labels),
                                                       return_convergence_delta=True)
+            attribution_end = time.time()
+            attribution_duration = round(attribution_end - attribution_start, 2)
+            logger.info(f'Attribution for label {label_id} took {attribution_duration} seconds')
             attributions = attributions.sum(dim=2).squeeze(0)
             attributions_sum = attributions / torch.norm(attributions)
             example_attrs.append({'attributions': attributions_sum, 'delta': delta,
@@ -247,8 +253,6 @@ for key in sorted(results.keys()):
 if mode == "test":
     print(classification_report(out_label_list, predictions))
 
-# For printing the results ####
-# TODO Needs to be accustomed for NER
 index = 0
 all_visualizations = []
 for example in examples:
@@ -294,3 +298,7 @@ display = viz.visualize_text(all_visualizations)
 
 with open('explanations.html', 'w') as file:
     file.write(display.data)
+
+whole_process_end = time.time()
+whole_process_duration = round(whole_process_end - whole_process_start, 2)
+logger.info(f'Whole process took {whole_process_duration} seconds')
