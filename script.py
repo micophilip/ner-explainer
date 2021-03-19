@@ -208,33 +208,36 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
 
     example_preds = np.argmax(logits_ndarray, axis=2)
 
-    interpretable_embedding = configure_interpretable_embedding_layer(deeplift_model,
-                                                                      'model.bert.embeddings.word_embeddings')
+    if np.any(example_preds[0], where=example_preds[0] != 0):
+        interpretable_embedding = configure_interpretable_embedding_layer(deeplift_model,
+                                                                          'model.bert.embeddings.word_embeddings')
+        input_embeddings = interpretable_embedding.indices_to_embeddings(input_ids)
 
-    input_embeddings = interpretable_embedding.indices_to_embeddings(input_ids)
-    for token_index in np.where(example_preds[example_index] != 0)[0]:
-        if out_label_ids[example_index][token_index] != pad_token_label_id:
-            label_id = example_preds[example_index][token_index]
-            target = (example_index, label_id)
-            logger.info(f'Calculating attribution for label {label_id} at index {token_index}')
-            attribution_start = time.time()
+        for token_index in np.where(example_preds[0] != 0)[0]:
+            if out_label_ids[example_index][token_index] != pad_token_label_id:
+                label_id = example_preds[0][token_index]
+                target = (example_index, label_id)
+                logger.info(f'Calculating attribution for label {label_id} at index {token_index}')
+                attribution_start = time.time()
 
-            attributions, delta = explainer.attribute(input_embeddings, target=target,
-                                                      additional_forward_args=batch_labels,
-                                                      return_convergence_delta=True)
-            # attributions, delta = explainer.attribute(input_ids, target=target,
-            #                                           additional_forward_args=(model, batch_labels),
-            #                                           return_convergence_delta=True)
-            attribution_end = time.time()
-            attribution_duration = round(attribution_end - attribution_start, 2)
-            logger.info(f'Attribution for label {label_id} took {attribution_duration} seconds')
-            attributions = attributions.sum(dim=2).squeeze(0)
-            attributions_sum = attributions / torch.norm(attributions)
-            example_attrs.append({'attributions': attributions_sum, 'delta': delta,
-                                  'token_index': token_index, 'label_id': label_id})
+                attributions, delta = explainer.attribute(input_embeddings, target=target,
+                                                          additional_forward_args=batch_labels,
+                                                          return_convergence_delta=True)
+                # attributions, delta = explainer.attribute(input_ids, target=target,
+                #                                           additional_forward_args=(model, batch_labels),
+                #                                           return_convergence_delta=True)
+                attribution_end = time.time()
+                attribution_duration = round(attribution_end - attribution_start, 2)
+                logger.info(f'Attribution for label {label_id} took {attribution_duration} seconds')
+                attributions = attributions.sum(dim=2).squeeze(0)
+                attributions_sum = attributions / torch.norm(attributions)
+                example_attrs.append({'attributions': attributions_sum, 'delta': delta,
+                                      'token_index': token_index, 'label_id': label_id,
+                                      'example_index': example_index})
+
+        remove_interpretable_embedding_layer(deeplift_model, interpretable_embedding)
 
     all_attributions.append(example_attrs)
-    remove_interpretable_embedding_layer(deeplift_model, interpretable_embedding)
 
     example_index += 1
 
@@ -247,9 +250,14 @@ label_map = {i: label for i, label in enumerate(labels)}
 out_label_list = [[] for _ in range(out_label_ids.shape[0])]
 predictions = [[] for _ in range(out_label_ids.shape[0])]
 
+# Do not print classification report if all predictions are O
+found_target_class = False
+
 for i in range(out_label_ids.shape[0]):
     for j in range(out_label_ids.shape[1]):
         if out_label_ids[i, j] != pad_token_label_id:
+            if preds[i][j] != 0:
+                found_target_class = True
             out_label_list[i].append(label_map[out_label_ids[i][j]])
             predictions[i].append(label_map[preds[i][j]])
 
@@ -264,7 +272,7 @@ logger.info("***** Eval results %s *****", prefix)
 for key in sorted(results.keys()):
     logger.info("  %s = %s", key, str(results[key]))
 
-if mode == "test":
+if mode == "test" and found_target_class:
     print(classification_report(out_label_list, predictions))
 
 index = 0
@@ -289,29 +297,31 @@ for example in examples:
     sentence = ' '.join(colored_words)
     print(sentence)
 
-    example_attributions = all_attributions[index]
-
-    for label_attribution in example_attributions:
-        label_id = label_attribution['label_id']
-        token_index = np.where(preds[index] == label_attribution['label_id'])[0][0]
-        attributions_sum = label_attribution['attributions']
-        delta = label_attribution['delta']
-        score_vis = viz.VisualizationDataRecord(word_attributions=attributions_sum,
-                                                pred_prob=max(confidences[index][token_index]),
-                                                pred_class=labels[label_id],
-                                                true_class=labels[label_id],
-                                                attr_class=labels[label_id],
-                                                attr_score=attributions_sum.sum(),
-                                                raw_input=all_tokens[index],
-                                                convergence_score=delta)
-        all_visualizations.append(score_vis)
+    if all_attributions:
+        example_attributions = all_attributions[index]
+        for label_attribution in example_attributions:
+            label_id = label_attribution['label_id']
+            example_index = label_attribution['example_index']
+            token_index = np.where(preds[example_index] == label_attribution['label_id'])[0][0]
+            attributions_sum = label_attribution['attributions']
+            delta = label_attribution['delta']
+            score_vis = viz.VisualizationDataRecord(word_attributions=attributions_sum,
+                                                    pred_prob=max(confidences[example_index][token_index]),
+                                                    pred_class=labels[label_id],
+                                                    true_class=labels[label_id],
+                                                    attr_class=labels[label_id],
+                                                    attr_score=attributions_sum.sum(),
+                                                    raw_input=all_tokens[example_index],
+                                                    convergence_score=delta)
+            all_visualizations.append(score_vis)
 
     index += 1
 
-display = viz.visualize_text(all_visualizations)
+if all_visualizations:
+    display = viz.visualize_text(all_visualizations)
 
-with open('explanations.html', 'w') as file:
-    file.write(display.data)
+    with open('explanations.html', 'w') as file:
+        file.write(display.data)
 
 whole_process_end = time.time()
 whole_process_duration = round(whole_process_end - whole_process_start, 2)
