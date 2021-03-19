@@ -6,7 +6,7 @@ import random
 import time
 import numpy as np
 import torch
-from captum.attr import LayerIntegratedGradients
+from captum.attr import LayerIntegratedGradients, LayerDeepLift, NeuronDeepLift, LayerDeepLiftShap
 from captum.attr import visualization as viz
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 from termcolor import colored
@@ -15,8 +15,9 @@ from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
+from captum.attr import configure_interpretable_embedding_layer, remove_interpretable_embedding_layer
 
-from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict
+from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict, NerModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -116,6 +117,7 @@ config = AutoConfig.from_pretrained(
     label2id=label2id,
     cache_dir=args.cache_dir if args.cache_dir else None,
 )
+
 model = AutoModelForTokenClassification.from_pretrained(args.model_name_or_path)
 model.load_state_dict(torch.load(os.path.join(args.model_name_or_path, 'pytorch_model.bin'), map_location='cpu'))
 model.to(device)
@@ -167,7 +169,10 @@ preds = None
 out_label_ids = None
 model.eval()
 
-explainer = LayerIntegratedGradients(predict, model.bert.embeddings)
+# explainer = LayerIntegratedGradients(predict, model.bert.embeddings)
+deeplift_model = NerModel(model)
+explainer = LayerDeepLift(deeplift_model, deeplift_model.model.bert.embeddings)  # TODO Compare with NeuronDeepLift
+
 example_index = 0
 
 all_attributions = []
@@ -203,15 +208,23 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
 
     example_preds = np.argmax(logits_ndarray, axis=2)
 
+    interpretable_embedding = configure_interpretable_embedding_layer(deeplift_model,
+                                                                      'model.bert.embeddings.word_embeddings')
+
+    input_embeddings = interpretable_embedding.indices_to_embeddings(input_ids)
     for token_index in np.where(example_preds[example_index] != 0)[0]:
         if out_label_ids[example_index][token_index] != pad_token_label_id:
             label_id = example_preds[example_index][token_index]
             target = (example_index, label_id)
             logger.info(f'Calculating attribution for label {label_id} at index {token_index}')
             attribution_start = time.time()
-            attributions, delta = explainer.attribute(input_ids, target=target,
-                                                      additional_forward_args=(model, batch_labels),
+
+            attributions, delta = explainer.attribute(input_embeddings, target=target,
+                                                      additional_forward_args=batch_labels,
                                                       return_convergence_delta=True)
+            # attributions, delta = explainer.attribute(input_ids, target=target,
+            #                                           additional_forward_args=(model, batch_labels),
+            #                                           return_convergence_delta=True)
             attribution_end = time.time()
             attribution_duration = round(attribution_end - attribution_start, 2)
             logger.info(f'Attribution for label {label_id} took {attribution_duration} seconds')
@@ -221,6 +234,7 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
                                   'token_index': token_index, 'label_id': label_id})
 
     all_attributions.append(example_attrs)
+    remove_interpretable_embedding_layer(deeplift_model, interpretable_embedding)
 
     example_index += 1
 

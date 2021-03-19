@@ -6,6 +6,7 @@ from seqeval.metrics import f1_score, precision_score, recall_score, classificat
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 import torch
@@ -339,3 +340,16 @@ def predict(input_ids, model, labels):
     _, logits = output[:2]
     logits.requires_grad_()
     return logits
+
+
+class NerModel(nn.Module):
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, inputs, labels):
+        output = self.model(inputs_embeds=inputs, labels=labels)
+        _, logits = output[:2]
+        logits.requires_grad_()
+        return logits
