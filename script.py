@@ -216,7 +216,7 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
         for token_index in np.where(example_preds[0] != 0)[0]:
             if out_label_ids[example_index][token_index] != pad_token_label_id:
                 label_id = example_preds[0][token_index]
-                target = (example_index, label_id)
+                target = (token_index, label_id)
                 logger.info(f'Calculating attribution for label {label_id} at index {token_index}')
                 attribution_start = time.time()
 
