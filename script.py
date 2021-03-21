@@ -283,19 +283,22 @@ for example in examples:
 
     colored_words = []
 
-    for i, element in enumerate(example.words):
-        if example.labels[i] != predictions[index][i]:
-            colored_words.append(colored(element, 'red', attrs=['reverse', 'blink']))
-            print(
-                f'{element} was predicted as {predictions[index][i]} but it is actually {example.labels[i]}')
-        elif example.labels[i] != 'O' and predictions[index][i] == example.labels[i]:
-            colored_words.append(colored(element, 'green', attrs=['reverse']))
-            print(f'{element} was correctly predicted as {predictions[index][i]}.')
-        else:
-            colored_words.append(colored(element, 'blue'))
+    if len(example.labels) == len(predictions[index]):
+        for i, element in enumerate(example.words):
+            if example.labels[i] != predictions[index][i]:
+                colored_words.append(colored(element, 'red', attrs=['reverse', 'blink']))
+                print(
+                    f'{element} was predicted as {predictions[index][i]} but it is actually {example.labels[i]}')
+            elif example.labels[i] != 'O' and predictions[index][i] == example.labels[i]:
+                colored_words.append(colored(element, 'green', attrs=['reverse']))
+                print(f'{element} was correctly predicted as {predictions[index][i]}.')
+            else:
+                colored_words.append(colored(element, 'blue'))
 
-    sentence = ' '.join(colored_words)
-    print(sentence)
+        sentence = ' '.join(colored_words)
+        print(sentence)
+    else:
+        logger.warning(f'Words length in example number {index + 1} does not match its predictions length')
 
     if all_attributions:
         example_attributions = all_attributions[index]
