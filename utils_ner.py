@@ -342,6 +342,13 @@ def predict(input_ids, model, labels):
     return logits
 
 
+def predict_with_embeddings(inputs, model, labels):
+    output = model(inputs_embeds=inputs, labels=labels)
+    _, logits = output[:2]
+    logits.requires_grad_()
+    return logits
+
+
 class NerModel(nn.Module):
 
     def __init__(self, model):

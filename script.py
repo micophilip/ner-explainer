@@ -17,7 +17,8 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
 from captum.attr import configure_interpretable_embedding_layer, remove_interpretable_embedding_layer
 
-from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict, NerModel
+from utils_ner import get_labels, read_examples_from_file, convert_examples_to_features, predict, NerModel, \
+    predict_with_embeddings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,6 +51,14 @@ parser.add_argument(
     type=str,
     required=True,
     help="Path to pre-trained model or shortcut name selected in the supported list.",
+)
+
+parser.add_argument(
+    "--explanations_dir",
+    default=None,
+    type=str,
+    required=True,
+    help="Path to explanations directory",
 )
 
 parser.add_argument(
@@ -169,9 +178,9 @@ preds = None
 out_label_ids = None
 model.eval()
 
-# explainer = LayerIntegratedGradients(predict, model.bert.embeddings)
-deeplift_model = NerModel(model)
-explainer = LayerDeepLift(deeplift_model, deeplift_model.model.bert.embeddings)
+explainer = LayerIntegratedGradients(predict_with_embeddings, model.bert.embeddings)
+# deeplift_model = NerModel(model)
+# explainer = LayerDeepLift(deeplift_model, deeplift_model.model.bert.embeddings)
 
 example_index = 0
 
@@ -208,8 +217,9 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
     example_preds = np.argmax(logits_ndarray, axis=2)
 
     if np.any(batch_labels_ndarray[0], where=batch_labels_ndarray[0] != 0):
-        interpretable_embedding = configure_interpretable_embedding_layer(deeplift_model,
-                                                                          'model.bert.embeddings.word_embeddings')
+        # interpretable_embedding = configure_interpretable_embedding_layer(deeplift_model,
+        #                                                                   'model.bert.embeddings.word_embeddings')
+        interpretable_embedding = configure_interpretable_embedding_layer(model, 'bert.embeddings.word_embeddings')
         input_embeddings = interpretable_embedding.indices_to_embeddings(input_ids)
 
         for token_index in np.where(batch_labels_ndarray[0] != 0)[0]:
@@ -220,12 +230,12 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
                 logger.info(f'Calculating attribution for label {label_id} at index {token_index}')
                 attribution_start = time.time()
 
-                attributions, delta = explainer.attribute(input_embeddings, target=target,
-                                                          additional_forward_args=batch_labels,
-                                                          return_convergence_delta=True)
-                # attributions, delta = explainer.attribute(input_ids, target=target,
-                #                                           additional_forward_args=(model, batch_labels),
+                # attributions, delta = explainer.attribute(input_embeddings, target=target,
+                #                                           additional_forward_args=batch_labels,
                 #                                           return_convergence_delta=True)
+                attributions, delta = explainer.attribute(input_embeddings, target=target,
+                                                          additional_forward_args=(model, batch_labels),
+                                                          return_convergence_delta=True)
                 attribution_end = time.time()
                 attribution_duration = round(attribution_end - attribution_start, 2)
                 logger.info(f'Attribution for label {label_id} took {attribution_duration} seconds')
@@ -235,7 +245,8 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
                                       'token_index': token_index, 'label_id': label_id,
                                       'true_label': true_label, 'example_index': example_index})
 
-        remove_interpretable_embedding_layer(deeplift_model, interpretable_embedding)
+        # remove_interpretable_embedding_layer(deeplift_model, interpretable_embedding)
+        remove_interpretable_embedding_layer(model, interpretable_embedding)
 
     all_attributions.append(example_attrs)
 
@@ -324,7 +335,7 @@ for example in examples:
 if all_visualizations:
     display = viz.visualize_text(all_visualizations)
 
-    with open('explanations.html', 'w') as file:
+    with open(f'{args.explanations_dir}/explanations.html', 'w') as file:
         file.write(display.data)
 
 whole_process_end = time.time()
