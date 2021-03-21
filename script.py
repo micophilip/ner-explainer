@@ -171,7 +171,7 @@ model.eval()
 
 # explainer = LayerIntegratedGradients(predict, model.bert.embeddings)
 deeplift_model = NerModel(model)
-explainer = LayerDeepLift(deeplift_model, deeplift_model.model.bert.embeddings)  # TODO Compare with NeuronDeepLift
+explainer = LayerDeepLift(deeplift_model, deeplift_model.model.bert.embeddings)
 
 example_index = 0
 
@@ -197,6 +197,7 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
         eval_loss += tmp_eval_loss.item()
     nb_eval_steps += 1
     logits_ndarray = logits.detach().cpu().numpy()
+    batch_labels_ndarray = batch_labels.detach().cpu().numpy()
     if preds is None:
         preds = logits_ndarray
         out_label_ids = inputs["labels"].detach().cpu().numpy()
@@ -204,18 +205,17 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
         preds = np.append(preds, logits_ndarray, axis=0)
         out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
 
-    # TODO To use DeepLIFT, ModelWrapper has to be created that overrides forward and possibly load_state_dict
-
     example_preds = np.argmax(logits_ndarray, axis=2)
 
-    if np.any(example_preds[0], where=example_preds[0] != 0):
+    if np.any(batch_labels_ndarray[0], where=batch_labels_ndarray[0] != 0):
         interpretable_embedding = configure_interpretable_embedding_layer(deeplift_model,
                                                                           'model.bert.embeddings.word_embeddings')
         input_embeddings = interpretable_embedding.indices_to_embeddings(input_ids)
 
-        for token_index in np.where(example_preds[0] != 0)[0]:
+        for token_index in np.where(batch_labels_ndarray[0] != 0)[0]:
             if out_label_ids[example_index][token_index] != pad_token_label_id:
                 label_id = example_preds[0][token_index]
+                true_label = batch_labels[0][token_index].item()
                 target = (token_index, label_id)
                 logger.info(f'Calculating attribution for label {label_id} at index {token_index}')
                 attribution_start = time.time()
@@ -233,7 +233,7 @@ for batch in tqdm(eval_dataloader, desc="Evaluating"):
                 attributions_sum = attributions / torch.norm(attributions)
                 example_attrs.append({'attributions': attributions_sum, 'delta': delta,
                                       'token_index': token_index, 'label_id': label_id,
-                                      'example_index': example_index})
+                                      'true_label': true_label, 'example_index': example_index})
 
         remove_interpretable_embedding_layer(deeplift_model, interpretable_embedding)
 
@@ -304,6 +304,7 @@ for example in examples:
         example_attributions = all_attributions[index]
         for label_attribution in example_attributions:
             label_id = label_attribution['label_id']
+            true_label = label_attribution['true_label']
             example_index = label_attribution['example_index']
             token_index = np.where(preds[example_index] == label_attribution['label_id'])[0][0]
             attributions_sum = label_attribution['attributions']
@@ -311,7 +312,7 @@ for example in examples:
             score_vis = viz.VisualizationDataRecord(word_attributions=attributions_sum,
                                                     pred_prob=max(confidences[example_index][token_index]),
                                                     pred_class=labels[label_id],
-                                                    true_class=labels[label_id],
+                                                    true_class=labels[true_label],
                                                     attr_class=labels[label_id],
                                                     attr_score=attributions_sum.sum(),
                                                     raw_input=all_tokens[example_index],
