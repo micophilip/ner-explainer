@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import torch.nn as nn
+from lit_nlp.api import dataset as lit_dataset
+from lit_nlp.api import types as lit_types
 
 logger = logging.getLogger(__name__)
 import torch
@@ -360,3 +362,21 @@ class NerModel(nn.Module):
         _, logits = output[:2]
         logits.requires_grad_()
         return logits
+
+
+class I2b2Dataset(lit_dataset.Dataset):
+
+    def __init__(self, split="test", data_dir='data'):
+        """Dataset constructor, loads the data into memory."""
+        raw_examples = read_examples_from_file(data_dir, split)
+        self._examples = []  # populate this with data records
+        for record in raw_examples:
+            self._examples.append({
+                "sentence": ' '.join(record.words)
+            })
+
+    def spec(self) -> lit_types.Spec:
+        """Dataset spec, which should match the model"s input_spec()."""
+        return {
+            "sentence": lit_types.TextSegment()
+        }
