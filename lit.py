@@ -123,24 +123,37 @@ class NerModel(lit_model.Model):
     def predict_minibatch(self,
                           inputs: List[JsonDict],
                           config=None) -> List[JsonDict]:
+
+        # encoded_input = self.tokenizer.batch_encode_plus(
+        #     [example["sentence"] for example in inputs],
+        #     return_tensors="pt",
+        #     add_special_tokens=True,
+        #     max_length=128,
+        #     pad_to_max_length=True)
         sentence = [seq['sentence'] for seq in inputs]
         tokens = ['[CLS]'] + self.tokenizer.tokenize(sentence[0]) + ['[SEP]']
         input_ids = [self.tokenizer.convert_tokens_to_ids(tokens)]
-        input_mask = [[1] * len(input_ids)]
-        model_input = {"input_ids": torch.tensor(input_ids, dtype=torch.long),
-                       "attention_mask": torch.tensor(input_mask, dtype=torch.long)}
+        input_mask = [[1] * len(input_ids[0])]
+        input_ids_tensor = torch.tensor(input_ids, dtype=torch.long)
+        input_mask_tensor = torch.tensor(input_mask, dtype=torch.long)
+        model_input = {"input_ids": input_ids_tensor,
+                       "attention_mask": input_mask_tensor}
         model_output = self.model(**model_input)
-        logits = model_output[:2][0]
+        logits, embs, unused_attentions = model_output[:3]
         logits_ndarray = logits.detach().cpu().numpy()
         example_preds = np.argmax(logits_ndarray, axis=2)
         confidences = torch.softmax(torch.from_numpy(logits_ndarray), dim=2).detach().cpu().numpy()
         label_map = {i: label for i, label in enumerate(self.LABELS)}
         predictions = [label_map[pred] for pred in example_preds[0]]
-        # TODO explanations require prediction probabilities
-        yield {
-            "tokens": tokens,
-            "bio_tags": predictions
-        }
+        # ntok = torch.sum(input_mask_tensor, dim=1)
+        outputs = {}
+        for i, attention_layer in enumerate(unused_attentions):
+            outputs[f'layer_{i}/attention'] = attention_layer[0].detach().cpu().numpy().copy()
+
+        outputs['tokens'] = tokens
+        outputs['bio_tags'] = predictions
+
+        yield outputs
 
     def input_spec(self) -> lit_types.Spec:
         return {
@@ -148,10 +161,13 @@ class NerModel(lit_model.Model):
         }
 
     def output_spec(self) -> lit_types.Spec:
-        return {
+        spec = {
             "tokens": lit_types.Tokens(),
             "bio_tags": lit_types.SequenceTags(align="tokens"),
         }
+        for i in range(self.model.config.num_hidden_layers):
+            spec[f'layer_{i}/attention'] = lit_types.AttentionHeads(align=("tokens", "tokens"))
+        return spec
 
 
 def main(_):
