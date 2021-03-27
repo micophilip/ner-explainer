@@ -124,20 +124,27 @@ class NerModel(lit_model.Model):
                           inputs: List[JsonDict],
                           config=None) -> List[JsonDict]:
 
-        # encoded_input = self.tokenizer.batch_encode_plus(
-        #     [example["sentence"] for example in inputs],
-        #     return_tensors="pt",
-        #     add_special_tokens=True,
-        #     max_length=128,
-        #     pad_to_max_length=True)
-        sentence = [seq['sentence'] for seq in inputs]
-        tokens = ['[CLS]'] + self.tokenizer.tokenize(sentence[0]) + ['[SEP]']
+        """
+        batch size set to 1 for simplicity, to use batch size greater than one, will need
+        to use self.tokenizer.batch_encode_plus as in the LIT examples
+        :param inputs: JSON of sentence and token to interpret
+        :param config:
+        :return: prediction output aligned with spec
+        """
+        mask_token = '[MASK]'
+        sentence = inputs[0]['sentence']
+        interpret_token_id = inputs[0]['token_to_interpret']
+        tokens = ['[CLS]'] + self.tokenizer.tokenize(sentence) + ['[SEP]']
         input_ids = [self.tokenizer.convert_tokens_to_ids(tokens)]
         input_mask = [[1] * len(input_ids[0])]
         input_ids_tensor = torch.tensor(input_ids, dtype=torch.long)
         input_mask_tensor = torch.tensor(input_mask, dtype=torch.long)
-        model_input = {"input_ids": input_ids_tensor,
-                       "attention_mask": input_mask_tensor}
+        # Needed for calculating grad based on embeddings
+        interpretable_embedding = configure_interpretable_embedding_layer(self.model, 'bert.embeddings.word_embeddings')
+        input_embeddings = interpretable_embedding.indices_to_embeddings(input_ids_tensor)
+        model_input = {
+            "inputs_embeds": input_embeddings,
+            "attention_mask": input_mask_tensor}
         model_output = self.model(**model_input)
         logits, embs, unused_attentions = model_output[:3]
         logits_ndarray = logits.detach().cpu().numpy()
@@ -145,25 +152,42 @@ class NerModel(lit_model.Model):
         confidences = torch.softmax(torch.from_numpy(logits_ndarray), dim=2).detach().cpu().numpy()
         label_map = {i: label for i, label in enumerate(self.LABELS)}
         predictions = [label_map[pred] for pred in example_preds[0]]
-        # ntok = torch.sum(input_mask_tensor, dim=1)
         outputs = {}
         for i, attention_layer in enumerate(unused_attentions):
             outputs[f'layer_{i}/attention'] = attention_layer[0].detach().cpu().numpy().copy()
 
+        # TODO Currently LIT lime explainer does not support targeting a specific token, until that's fixed,
+        #  we explain the first non-O index if there's one, or the first token (after [CLS]).
+        if interpret_token_id < 0 or mask_token in sentence:
+            scalar_output = np.where(example_preds[0] != 0)[0]
+            token_index = scalar_output[0] if len(scalar_output > 1) else 1
+        else:
+            # TODO When LIT lime explainer is configurable, we'll set the token_index from the UI
+            token_index = interpret_token_id
+
         outputs['tokens'] = tokens
         outputs['bio_tags'] = predictions
+        grad = torch.autograd.grad(torch.unbind(logits[0][token_index]), embs[0])
+        outputs['grads'] = grad[0][0].detach().cpu().numpy()
+        outputs['probas'] = confidences[0][token_index]
+        outputs['token_ids'] = list(range(0, len(tokens)))
 
+        remove_interpretable_embedding_layer(self.model, interpretable_embedding)
         yield outputs
 
     def input_spec(self) -> lit_types.Spec:
         return {
-            "sentence": lit_types.TextSegment()
+            "sentence": lit_types.TextSegment(),
+            "token_to_interpret": lit_types.Scalar()
         }
 
     def output_spec(self) -> lit_types.Spec:
         spec = {
             "tokens": lit_types.Tokens(),
             "bio_tags": lit_types.SequenceTags(align="tokens"),
+            "token_ids": lit_types.SequenceTags(align="tokens"),
+            "grads": lit_types.TokenGradients(align="tokens"),
+            "probas": lit_types.MulticlassPreds(parent="bio_tags", vocab=self.LABELS)
         }
         for i in range(self.model.config.num_hidden_layers):
             spec[f'layer_{i}/attention'] = lit_types.AttentionHeads(align=("tokens", "tokens"))

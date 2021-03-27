@@ -372,11 +372,13 @@ class I2b2Dataset(lit_dataset.Dataset):
         self._examples = []  # populate this with data records
         for record in raw_examples:
             self._examples.append({
-                "sentence": ' '.join(record.words)
+                "sentence": ' '.join(record.words),
+                "token_to_interpret": -1
             })
 
     def spec(self) -> lit_types.Spec:
         """Dataset spec, which should match the model"s input_spec()."""
         return {
-            "sentence": lit_types.TextSegment()
+            "sentence": lit_types.TextSegment(),
+            "token_to_interpret": lit_types.Scalar()
         }
