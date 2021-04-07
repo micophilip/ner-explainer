@@ -112,8 +112,8 @@ class NerModel(lit_model.Model):
         :return: prediction output aligned with spec
         """
         mask_token = '[MASK]'
-        sentence = inputs[0]['sentence']
-        interpret_token_id = inputs[0]['token_to_interpret']
+        sentence = inputs[0]['Sentence']
+        interpret_token_id = inputs[0]['Token Index to Explain']
         tokens = ['[CLS]'] + self.tokenizer.tokenize(sentence) + ['[SEP]']
         input_ids = [self.tokenizer.convert_tokens_to_ids(tokens)]
         input_mask = [[1] * len(input_ids[0])]
@@ -157,8 +157,8 @@ class NerModel(lit_model.Model):
 
     def input_spec(self) -> lit_types.Spec:
         return {
-            "sentence": lit_types.TextSegment(),
-            "token_to_interpret": lit_types.Scalar()
+            "Sentence": lit_types.TextSegment(),
+            "Token Index to Explain": lit_types.Scalar()
         }
 
     def output_spec(self) -> lit_types.Spec:
