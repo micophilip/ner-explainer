@@ -1,6 +1,6 @@
 # Named Entity Recognition Explainer
 
-This project adapts Integrated Gradients implementation provided by Captum for named entity recognition task to explain
+This project adapts [Integrated Gradients](http://proceedings.mlr.press/v70/sundararajan17a/sundararajan17a.pdf) implementation provided by Captum for named entity recognition task to explain
 BERT model predictions on I2B2 2014 - PHI dataset. It also extends Language Interpretability Tool (LIT) to visualize
 and debug NER BERT models. This project can explain any BERT-based model on NER task for any dataset in CONLL format.
 
