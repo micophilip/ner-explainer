@@ -2,18 +2,18 @@
 
 This project adapts Integrated Gradients implementation provided by Captum for named entity recognition task to explain
 BERT model predictions on I2B2 2014 - PHI dataset. It also extends Language Interpretability Tool (LIT) to visualize
-and debug NER BERT models.
+and debug NER BERT models. This project can explain any BERT-based model on NER task for any dataset in CONLL format.
 
 ## Acknowledgments
 
-Code in this project was based on [HuggingFace](https://github.com/huggingface/transformers) and the extensive
-documentation provided by [Captum](https://captum.ai) and [LIT](https://github.com/PAIR-code/lit) repositories.
+Code in this project was based on code in [HuggingFace](https://github.com/huggingface/transformers) and the extensive
+examples provided by [Captum](https://captum.ai) and [LIT](https://github.com/PAIR-code/lit) repositories.
 
 ## Running
 
 ### Perequisites
 
-* Any BERT model trained on NER I2B2 2014 dataset. The model needs to be trained by HuggingFace NER
+* Any BERT model trained on NER for a CONLL-based dataset. The model needs to be trained by HuggingFace NER
 [script](https://bit.ly/3dByYL0).
 * A dataset in CONLL format. Test dataset in data folder assumed to be called `test.txt`
 * Python 3.x (tested with 3.7)  
