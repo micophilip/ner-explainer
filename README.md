@@ -37,7 +37,7 @@ python lit.py --model_path /pth/to/trained/model --labels /path/to/labels.txt
 
 The dataset used in this project is I2B2 2014 PHI dataset. Can be requested from the 
 [Department of Biomedical Informatics](https://portal.dbmi.hms.harvard.edu) and is provided for free to students
-and researchers.
+and researchers. Any NER-annotated CONLL dataset can be used with this project.
 
 ## Results
 
