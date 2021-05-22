@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://github.com/micophilip/ner-explainer/blob/master/LICENSE" alt="License">
+    <img src=https://img.shields.io/apm/l/vim-mode?style=flat-square/>
+  </a>
+</p>
+
 # Named Entity Recognition Explainer
 
 This project adapts [Integrated Gradients](http://proceedings.mlr.press/v70/sundararajan17a/sundararajan17a.pdf) implementation provided by Captum for named entity recognition task to explain
