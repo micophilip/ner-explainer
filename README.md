@@ -20,7 +20,7 @@ examples provided by [Captum](https://captum.ai) and [LIT](https://github.com/PA
 ### Perequisites
 
 * Any BERT model trained on NER for a CONLL-based dataset. The model needs to be trained by HuggingFace NER
-[script](https://bit.ly/3dByYL0).
+[script](https://github.com/huggingface/transformers/tree/4a872caef4e70595202c64687a074f99772d8e92/examples/pytorch/token-classification).
 * A dataset in CONLL format. Test dataset in data folder assumed to be called `test.txt`
 * Python 3.x (tested with 3.7)  
 * Run `pip install -r requirements.txt`
