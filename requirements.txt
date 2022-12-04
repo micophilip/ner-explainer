@@ -1,4 +1,4 @@
-torch==1.7.1
+torch==1.13.1
 torchvision==0.2.1
 tqdm==4.58.0
 termcolor==1.1.0
